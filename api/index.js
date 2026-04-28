@@ -206,6 +206,3 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`memota-back running on port ${PORT}`));
 
 module.exports = app;
-
-const aiRouter = require('./routes/ai');
-app.use('/ai', aiRouter);
