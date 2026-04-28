@@ -127,7 +127,7 @@ app.put('/tasks/:userId', authMiddleware, async (req, res) => {
 
 // ── AI 계획 생성 ────────────────────────────────────
 app.post('/ai/plan', authMiddleware, async (req, res) => {
-  const { goal, detail, weeks } = req.body;
+  const { goal, detail, duration, startDate } = req.body;
 
   if (!goal) return res.status(400).json({ error: '목표를 입력해주세요.' });
 
@@ -135,37 +135,64 @@ app.post('/ai/plan', authMiddleware, async (req, res) => {
     const Groq = require('groq-sdk');
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-    const prompt = `당신은 일정 계획 전문가입니다.
-사용자의 목표: "${goal}"
-세부 사항: "${detail || '없음'}"
-기간: ${weeks}주
+    // 주차별 날짜 범위 계산
+    const start = new Date(startDate || new Date());
+    const weekCount = parseInt(duration) || 1;
+    const weekRanges = [];
+    for (let w = 0; w < weekCount; w++) {
+      const weekStart = new Date(start);
+      weekStart.setDate(start.getDate() + w * 7);
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekStart.getDate() + 6);
+      weekRanges.push(`${w+1}주차: ${weekStart.getMonth()+1}월 ${weekStart.getDate()}일(월) ~ ${weekEnd.getMonth()+1}월 ${weekEnd.getDate()}일(일)`);
+    }
 
-다음 JSON 형식으로만 응답하세요 (설명 없이):
+    const prompt = `당신은 개인 플래너 AI 어시스턴트입니다.
+
+[절대 규칙]
+- 모든 텍스트는 100% 순수 한국어(한글)로만 작성하세요.
+- 한자, 일본어, 영어 등 외국어를 절대 사용하지 마세요.
+- 반드시 유효한 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요.
+- weeks 배열에 반드시 ${weekCount}개의 주차 데이터를 모두 포함하세요.
+- 각 주차의 days 배열에는 월,화,수,목,금,토,일 7개 요일이 모두 있어야 합니다.
+- 각 할 일은 15자 이내 한글로 작성하세요.
+
+사용자 목표: "${goal}"
+세부 사항: "${detail || '없음'}"
+기간: ${weekCount}주
+시작 날짜: ${startDate}
+주차별 날짜:
+${weekRanges.join('\n')}
+
+응답 형식:
 {
-  "valid": true,
+  "rejected": false,
   "weeks": [
     {
       "week": 1,
-      "days": {
-        "월": ["할일1", "할일2"],
-        "화": ["할일1"],
-        "수": ["할일1"],
-        "목": ["할일1"],
-        "금": ["할일1"],
-        "토": ["할일1"],
-        "일": ["할일1"]
-      }
+      "theme": "1주차 목표 한글",
+      "days": [
+        { "day": "월", "tasks": ["할 일1", "할 일2"] },
+        { "day": "화", "tasks": ["할 일1"] },
+        { "day": "수", "tasks": ["할 일1"] },
+        { "day": "목", "tasks": ["할 일1"] },
+        { "day": "금", "tasks": ["할 일1"] },
+        { "day": "토", "tasks": [] },
+        { "day": "일", "tasks": [] }
+      ]
     }
   ]
 }
 
-목표가 너무 추상적이면: {"valid": false, "message": "더 구체적인 목표를 입력해주세요."}`;
+목표가 너무 추상적이면: { "rejected": true, "message": "더 구체적인 목표를 입력해주세요." }
+
+반드시 ${weekCount}주차 데이터를 전부 생성하고, JSON만 출력하세요.`;
 
     const completion = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.7,
-      max_tokens: 2000,
+      temperature: 0.3,
+      max_tokens: 3000,
     });
 
     const text = completion.choices[0].message.content;
