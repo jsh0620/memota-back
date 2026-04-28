@@ -114,17 +114,42 @@ app.put('/tasks/:userId', authMiddleware, async (req, res) => {
   const { userId } = req.params;
   const { tasks } = req.body;
 
-  const { error } = await supabase
-    .from('tasks')
-    .upsert(
-      tasks.map((t) => ({ ...t, user_id: userId })),
-      { onConflict: 'id' }
-    );
+  if (!tasks || !Array.isArray(tasks)) {
+    return res.status(400).json({ error: 'tasks 배열이 필요합니다.' });
+  }
 
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ ok: true });
+  try {
+    // 기존 tasks 전체 삭제 후 새로 삽입 (upsert 대신)
+    const { error: deleteError } = await supabase
+      .from('tasks')
+      .delete()
+      .eq('user_id', userId);
+
+    if (deleteError) throw deleteError;
+
+    if (tasks.length > 0) {
+      const { error: insertError } = await supabase
+        .from('tasks')
+        .insert(
+          tasks.map((t) => ({
+            id: t.id,
+            user_id: userId,
+            text: t.text,
+            completed: t.completed,
+            date: t.date,
+            category: t.category || '기타',
+            time: t.time || '',
+          }))
+        );
+
+      if (insertError) throw insertError;
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: '저장 실패: ' + err.message });
+  }
 });
-
 // ── AI 계획 생성 ────────────────────────────────────
 app.post('/ai/plan', authMiddleware, async (req, res) => {
   const { goal, detail, duration, startDate } = req.body;
