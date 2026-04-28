@@ -6,7 +6,6 @@ const router = express.Router();
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
-// ── Groq 호출 공통 함수 ──────────────────────────────
 async function callGroq(systemPrompt, userPrompt) {
   const response = await fetch(GROQ_API_URL, {
     method: 'POST',
@@ -16,7 +15,7 @@ async function callGroq(systemPrompt, userPrompt) {
     },
     body: JSON.stringify({
       model: GROQ_MODEL,
-      temperature: 0.5, // 창의성보다는 정확도를 위해 온도를 낮춤
+      temperature: 0.3,
       max_tokens: 2048,
       messages: [
         { role: 'system', content: systemPrompt },
@@ -34,30 +33,33 @@ async function callGroq(systemPrompt, userPrompt) {
   return data.choices[0].message.content;
 }
 
-// ── JSON 안전 파싱 ──────────────────────────────────
 function safeParseJSON(text) {
-  const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  const cleaned = text
+    .replace(/```json\n?/g, '')
+    .replace(/```\n?/g, '')
+    .trim();
   return JSON.parse(cleaned);
 }
 
-// ────────────────────────────────────────────────────
-// POST /ai/plan  — 목표 기반 계획 생성
-// ────────────────────────────────────────────────────
+// POST /ai/plan
 router.post('/plan', async (req, res) => {
   try {
-    const { goal, duration, detail } = req.body;
+    const { goal, duration, detail, startDate } = req.body;
 
     if (!goal || !duration) {
       return res.status(400).json({ error: '목표와 기간은 필수입니다.' });
     }
 
     const systemPrompt = `당신은 개인 플래너 AI 어시스턴트입니다.
-반드시 다음 규칙을 엄격히 준수하세요:
 
-1. 언어 제한: 모든 텍스트는 오직 '한국어'로만 작성하세요. 한자(漢字)나 다른 외국어 단어를 절대 사용하지 마세요. (예: 最近 -> 최근, 2週 -> 2주)
-2. 형식: 반드시 유효한 JSON 형식으로만 응답하세요. 다른 설명 텍스트는 절대 포함하지 마세요.
-3. 간결성: 각 할 일은 15자 이내의 명확한 한글 문장으로 작성하세요.
-4. 목표 검증: 목표가 너무 추상적이면 rejected: true를 반환하세요.
+[절대 규칙 - 반드시 준수]
+- 모든 텍스트는 100% 순수 한국어(한글)로만 작성하세요.
+- 한자(漢字), 일본어, 영어, 중국어 등 외국어를 단 한 글자도 사용하지 마세요.
+- 예시: "最近" 금지 → "최근" 사용, "2週" 금지 → "2주" 사용
+- 숫자와 한글만 사용 가능합니다.
+- 반드시 유효한 JSON 형식으로만 응답하세요. JSON 외 다른 텍스트는 절대 포함하지 마세요.
+- 각 할 일은 15자 이내의 명확한 한글 문장으로 작성하세요.
+- 목표가 너무 추상적이면 rejected: true를 반환하세요.
 
 응답 형식 (JSON):
 {
@@ -65,33 +67,42 @@ router.post('/plan', async (req, res) => {
   "weeks": [
     {
       "week": 1,
-      "theme": "한글로 된 이번 주 목표",
+      "theme": "이번 주 목표를 한글로",
       "days": [
-        { "day": "월", "tasks": ["한글 할 일 1", "한글 할 일 2"] }
+        { "day": "월", "tasks": ["한글 할 일 1", "한글 할 일 2"] },
+        { "day": "화", "tasks": ["한글 할 일 1"] },
+        { "day": "수", "tasks": ["한글 할 일 1"] },
+        { "day": "목", "tasks": ["한글 할 일 1"] },
+        { "day": "금", "tasks": ["한글 할 일 1"] },
+        { "day": "토", "tasks": [] },
+        { "day": "일", "tasks": [] }
       ]
     }
   ]
-}`;
+}
+
+목표가 추상적인 경우:
+{ "rejected": true, "message": "더 구체적인 목표를 입력해주세요." }`;
 
     const userPrompt = `목표: ${goal}
 기간: ${duration}주
-${detail ? `세부 사항: ${detail}` : ''}
+시작 날짜: ${startDate}
+세부 사항: ${detail || '없음'}
 
-위 목표에 맞는 계획을 생성해줘. 절대 한자를 섞지 말고 순수 한국어로만 답변해.`;
+위 정보를 바탕으로 ${duration}주치 계획을 생성해줘.
+반드시 모든 텍스트를 순수 한국어(한글)로만 작성하고, 한자나 외국어는 절대 사용하지 마.
+JSON 형식으로만 답변해.`;
 
     const raw = await callGroq(systemPrompt, userPrompt);
     const parsed = safeParseJSON(raw);
-
     return res.json(parsed);
   } catch (err) {
     console.error('/ai/plan 오류:', err);
-    return res.status(500).json({ error: 'AI 계획 생성 중 오류가 발생했습니다.' });
+    return res.status(500).json({ error: 'AI 계획 생성 중 오류가 발생했습니다: ' + err.message });
   }
 });
 
-// ────────────────────────────────────────────────────
-// POST /ai/analyze  — 최근 2주 데이터 분석 + 다음 주 추천
-// ────────────────────────────────────────────────────
+// POST /ai/analyze
 router.post('/analyze', async (req, res) => {
   try {
     const { tasks } = req.body;
@@ -114,39 +125,24 @@ router.post('/analyze', async (req, res) => {
     }
 
     const total = recentTasks.length;
-    const done = recentTasks.filter(t => t.completed).length;
-    const rate = Math.round((done / total) * 100);
+    const done  = recentTasks.filter(t => t.completed).length;
+    const rate  = Math.round((done / total) * 100);
 
-    const dayStats = {};
-    const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
-    recentTasks.forEach(t => {
-      const day = DAY_NAMES[new Date(t.date).getDay()];
-      if (!dayStats[day]) dayStats[day] = { total: 0, done: 0 };
-      dayStats[day].total++;
-      if (t.completed) dayStats[day].done++;
-    });
+    const systemPrompt = `당신은 개인 생산성 코치 AI입니다.
 
-    const catStats = {};
-    recentTasks.forEach(t => {
-      const cat = t.category || '기타';
-      if (!catStats[cat]) catStats[cat] = { total: 0, done: 0 };
-      catStats[cat].total++;
-      if (t.completed) catStats[cat].done++;
-    });
-
-    const systemPrompt = `당신은 개인 생산성 코치 AI입니다. 사용자의 데이터를 분석하여 인사이트를 제공합니다.
-
-반드시 다음 규칙을 엄격히 준수하세요:
-1. 언어: 모든 답변은 반드시 '한국어(한글)'로만 작성하세요. '最近', '結果'와 같은 한자나 외국어를 절대 섞지 마세요. 100% 자연스러운 한국어 구어체로 작성하세요.
-2. 톤: 따뜻하고 격려하는 말투를 사용하세요.
-3. 형식: 유효한 JSON 형식으로만 응답하세요. 다른 텍스트는 일체 금지입니다.
-4. 인사이트: 분석 결과에 기반하여 3문장 이내의 한글 인사이트를 제공하세요.
+[절대 규칙 - 반드시 준수]
+- 모든 텍스트는 100% 순수 한국어(한글)로만 작성하세요.
+- 한자(漢字), 일본어, 영어, 중국어 등 외국어를 단 한 글자도 사용하지 마세요.
+- 예시: "最近" 금지 → "최근", "結果" 금지 → "결과", "今週" 금지 → "이번 주"
+- 숫자와 한글만 사용 가능합니다.
+- 반드시 유효한 JSON 형식으로만 응답하세요.
+- 톤은 따뜻하고 격려하는 말투를 사용하세요.
 
 응답 형식 (JSON):
 {
   "insights": [
-    "격려와 분석이 담긴 한글 문장 1",
-    "격려와 분석이 담긴 한글 문장 2"
+    "분석 인사이트 한글 문장 1",
+    "분석 인사이트 한글 문장 2"
   ],
   "bestDay": "월요일",
   "weakDay": "금요일",
@@ -154,24 +150,31 @@ router.post('/analyze', async (req, res) => {
   "nextWeekPlan": {
     "theme": "다음 주 한글 테마",
     "days": [
-      { "day": "월", "tasks": ["한글 할 일"] }
+      { "day": "월", "tasks": ["한글 할 일"] },
+      { "day": "화", "tasks": ["한글 할 일"] },
+      { "day": "수", "tasks": [] },
+      { "day": "목", "tasks": [] },
+      { "day": "금", "tasks": [] },
+      { "day": "토", "tasks": [] },
+      { "day": "일", "tasks": [] }
     ]
   }
 }`;
 
     const userPrompt = `분석 데이터:
-- 달성률: ${rate}% (총 ${total}개 중 ${done}개 완료)
-- 요일별/카테고리별 통계 기반 분석
+- 전체 달성률: ${rate}% (총 ${total}개 중 ${done}개 완료)
+- 최근 2주간 할 일 목록: ${JSON.stringify(recentTasks.map(t => ({ date: t.date, text: t.text, completed: t.completed, category: t.category })))}
 
-이 데이터를 바탕으로 인사이트를 작성해줘. 절대 한자나 다른 외국어를 사용하지 말고, 자연스러운 한국어로만 답변해줘.`;
+이 데이터를 바탕으로 인사이트와 다음 주 추천 계획을 작성해줘.
+절대 한자나 외국어를 사용하지 말고, 100% 순수 한국어로만 답변해.
+JSON 형식으로만 답변해.`;
 
     const raw = await callGroq(systemPrompt, userPrompt);
     const parsed = safeParseJSON(raw);
-
     return res.json({ ...parsed, rate });
   } catch (err) {
     console.error('/ai/analyze 오류:', err);
-    return res.status(500).json({ error: 'AI 분석 중 오류가 발생했습니다.' });
+    return res.status(500).json({ error: 'AI 분석 중 오류가 발생했습니다: ' + err.message });
   }
 });
 
