@@ -16,12 +16,10 @@ const supabase = createClient(
 
 const JWT_SECRET = process.env.JWT_SECRET || 'memota-secret-key';
 
-// ── 헬스 체크 ──────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'memota-back running' });
 });
 
-// ── 회원가입 ────────────────────────────────────────
 app.post('/auth/register', async (req, res) => {
   const { username, password } = req.body;
 
@@ -30,7 +28,6 @@ app.post('/auth/register', async (req, res) => {
   if (!password || password.length < 6)
     return res.status(400).json({ error: '비밀번호는 6자 이상이어야 합니다.' });
 
-  // 중복 확인
   const { data: existing } = await supabase
     .from('profiles')
     .select('id')
@@ -58,7 +55,6 @@ app.post('/auth/register', async (req, res) => {
   res.json({ token, user: { id: data.id, username } });
 });
 
-// ── 로그인 ──────────────────────────────────────────
 app.post('/auth/login', async (req, res) => {
   const { username, password } = req.body;
 
@@ -84,7 +80,6 @@ app.post('/auth/login', async (req, res) => {
   res.json({ token, user: { id: user.id, username: user.username } });
 });
 
-// ── JWT 인증 미들웨어 ────────────────────────────────
 function authMiddleware(req, res, next) {
   const auth = req.headers.authorization;
   if (!auth) return res.status(401).json({ error: '인증 토큰 없음' });
@@ -98,12 +93,39 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ── 내 정보 조회 ─────────────────────────────────────
 app.get('/auth/me', authMiddleware, (req, res) => {
   res.json({ user: req.user });
 });
 
-// ── AI 계획 생성 (Groq) ──────────────────────────────
+// ── 할 일 조회 ──────────────────────────────────────
+app.get('/tasks/:userId', authMiddleware, async (req, res) => {
+  const { userId } = req.params;
+  const { data, error } = await supabase
+    .from('tasks')
+    .select('*')
+    .eq('user_id', userId);
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ tasks: data || [] });
+});
+
+// ── 할 일 저장 ──────────────────────────────────────
+app.put('/tasks/:userId', authMiddleware, async (req, res) => {
+  const { userId } = req.params;
+  const { tasks } = req.body;
+
+  const { error } = await supabase
+    .from('tasks')
+    .upsert(
+      tasks.map((t) => ({ ...t, user_id: userId })),
+      { onConflict: 'id' }
+    );
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+});
+
+// ── AI 계획 생성 ────────────────────────────────────
 app.post('/ai/plan', authMiddleware, async (req, res) => {
   const { goal, detail, weeks } = req.body;
 
@@ -156,16 +178,16 @@ app.post('/ai/plan', authMiddleware, async (req, res) => {
   }
 });
 
-// ── AI 주간 분석 ─────────────────────────────────────
+// ── AI 주간 분석 ────────────────────────────────────
 app.post('/ai/analyze', authMiddleware, async (req, res) => {
-  const { plannerData } = req.body;
+  const { tasks } = req.body;
 
   try {
     const Groq = require('groq-sdk');
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
     const prompt = `다음은 사용자의 최근 2주 플래너 데이터입니다:
-${JSON.stringify(plannerData, null, 2)}
+${JSON.stringify(tasks, null, 2)}
 
 분석 후 다음 JSON 형식으로만 응답하세요:
 {
