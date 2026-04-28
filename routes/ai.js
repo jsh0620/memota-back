@@ -16,7 +16,7 @@ async function callGroq(systemPrompt, userPrompt) {
     },
     body: JSON.stringify({
       model: GROQ_MODEL,
-      temperature: 0.7,
+      temperature: 0.5, // 창의성보다는 정확도를 위해 온도를 낮춤
       max_tokens: 2048,
       messages: [
         { role: 'system', content: systemPrompt },
@@ -36,7 +36,6 @@ async function callGroq(systemPrompt, userPrompt) {
 
 // ── JSON 안전 파싱 ──────────────────────────────────
 function safeParseJSON(text) {
-  // ```json ... ``` 마크다운 코드블록 제거
   const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
   return JSON.parse(cleaned);
 }
@@ -53,46 +52,32 @@ router.post('/plan', async (req, res) => {
     }
 
     const systemPrompt = `당신은 개인 플래너 AI 어시스턴트입니다.
-사용자의 목표를 분석하여 구체적이고 실행 가능한 주차별/요일별 계획을 생성합니다.
+반드시 다음 규칙을 엄격히 준수하세요:
 
-규칙:
-1. 반드시 유효한 JSON 형식으로만 응답하세요. 다른 텍스트는 절대 포함하지 마세요.
-2. 목표가 너무 추상적이거나 불분명하면 rejected: true를 반환하세요.
-3. 모든 내용은 한국어로 작성하세요.
-4. 각 할 일은 15자 이내의 간결한 문장으로 작성하세요.
-5. 하루에 2~4개의 할 일만 배정하세요.
+1. 언어 제한: 모든 텍스트는 오직 '한국어'로만 작성하세요. 한자(漢字)나 다른 외국어 단어를 절대 사용하지 마세요. (예: 最近 -> 최근, 2週 -> 2주)
+2. 형식: 반드시 유효한 JSON 형식으로만 응답하세요. 다른 설명 텍스트는 절대 포함하지 마세요.
+3. 간결성: 각 할 일은 15자 이내의 명확한 한글 문장으로 작성하세요.
+4. 목표 검증: 목표가 너무 추상적이면 rejected: true를 반환하세요.
 
-응답 형식 (목표가 구체적인 경우):
+응답 형식 (JSON):
 {
   "rejected": false,
   "weeks": [
     {
       "week": 1,
-      "theme": "이번 주 핵심 목표",
+      "theme": "한글로 된 이번 주 목표",
       "days": [
-        { "day": "월", "tasks": ["할 일1", "할 일2"] },
-        { "day": "화", "tasks": ["할 일1"] },
-        { "day": "수", "tasks": ["할 일1", "할 일2"] },
-        { "day": "목", "tasks": ["할 일1"] },
-        { "day": "금", "tasks": ["할 일1", "할 일2"] },
-        { "day": "토", "tasks": ["할 일1"] },
-        { "day": "일", "tasks": ["할 일1"] }
+        { "day": "월", "tasks": ["한글 할 일 1", "한글 할 일 2"] }
       ]
     }
   ]
-}
-
-응답 형식 (목표가 너무 추상적인 경우):
-{
-  "rejected": true,
-  "reason": "목표가 너무 추상적입니다. 예: '토익 800점 달성', '매일 30분 운동하기', '파이썬 기초 완성' 처럼 구체적으로 입력해주세요."
 }`;
 
     const userPrompt = `목표: ${goal}
 기간: ${duration}주
 ${detail ? `세부 사항: ${detail}` : ''}
 
-위 목표에 맞는 ${duration}주 계획을 생성해주세요.`;
+위 목표에 맞는 계획을 생성해줘. 절대 한자를 섞지 말고 순수 한국어로만 답변해.`;
 
     const raw = await callGroq(systemPrompt, userPrompt);
     const parsed = safeParseJSON(raw);
@@ -115,7 +100,6 @@ router.post('/analyze', async (req, res) => {
       return res.status(400).json({ error: '분석할 데이터가 없습니다.' });
     }
 
-    // 최근 2주 데이터만 필터링
     const now = new Date();
     const twoWeeksAgo = new Date(now);
     twoWeeksAgo.setDate(now.getDate() - 14);
@@ -129,12 +113,10 @@ router.post('/analyze', async (req, res) => {
       return res.status(400).json({ error: '최근 2주 데이터가 없습니다.' });
     }
 
-    // 통계 계산
     const total = recentTasks.length;
     const done = recentTasks.filter(t => t.completed).length;
     const rate = Math.round((done / total) * 100);
 
-    // 요일별 통계
     const dayStats = {};
     const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
     recentTasks.forEach(t => {
@@ -144,7 +126,6 @@ router.post('/analyze', async (req, res) => {
       if (t.completed) dayStats[day].done++;
     });
 
-    // 카테고리별 통계
     const catStats = {};
     recentTasks.forEach(t => {
       const cat = t.category || '기타';
@@ -153,55 +134,36 @@ router.post('/analyze', async (req, res) => {
       if (t.completed) catStats[cat].done++;
     });
 
-    const systemPrompt = `당신은 개인 생산성 코치 AI입니다.
-사용자의 최근 2주 플래너 데이터를 분석하여 인사이트와 다음 주 추천 계획을 생성합니다.
+    const systemPrompt = `당신은 개인 생산성 코치 AI입니다. 사용자의 데이터를 분석하여 인사이트를 제공합니다.
 
-규칙:
-1. 반드시 유효한 JSON 형식으로만 응답하세요. 다른 텍스트는 절대 포함하지 마세요.
-2. 모든 내용은 한국어로 작성하세요.
-3. 인사이트는 2~3문장의 따뜻하고 격려하는 톤으로 작성하세요.
-4. 다음 주 추천 할 일은 각 15자 이내로 작성하세요.
-5. 하루에 2~3개의 할 일만 배정하세요.
+반드시 다음 규칙을 엄격히 준수하세요:
+1. 언어: 모든 답변은 반드시 '한국어(한글)'로만 작성하세요. '最近', '結果'와 같은 한자나 외국어를 절대 섞지 마세요. 100% 자연스러운 한국어 구어체로 작성하세요.
+2. 톤: 따뜻하고 격려하는 말투를 사용하세요.
+3. 형식: 유효한 JSON 형식으로만 응답하세요. 다른 텍스트는 일체 금지입니다.
+4. 인사이트: 분석 결과에 기반하여 3문장 이내의 한글 인사이트를 제공하세요.
 
-응답 형식:
+응답 형식 (JSON):
 {
   "insights": [
-    "인사이트 문장 1",
-    "인사이트 문장 2",
-    "인사이트 문장 3"
+    "격려와 분석이 담긴 한글 문장 1",
+    "격려와 분석이 담긴 한글 문장 2"
   ],
-  "bestDay": "가장 생산적인 요일",
-  "weakDay": "가장 약한 요일",
-  "topCategory": "가장 많이 한 카테고리",
+  "bestDay": "월요일",
+  "weakDay": "금요일",
+  "topCategory": "공부",
   "nextWeekPlan": {
-    "theme": "다음 주 추천 테마",
+    "theme": "다음 주 한글 테마",
     "days": [
-      { "day": "월", "tasks": ["할 일1", "할 일2"] },
-      { "day": "화", "tasks": ["할 일1"] },
-      { "day": "수", "tasks": ["할 일1", "할 일2"] },
-      { "day": "목", "tasks": ["할 일1"] },
-      { "day": "금", "tasks": ["할 일1", "할 일2"] },
-      { "day": "토", "tasks": ["할 일1"] },
-      { "day": "일", "tasks": ["할 일1"] }
+      { "day": "월", "tasks": ["한글 할 일"] }
     ]
   }
 }`;
 
-    const userPrompt = `최근 2주 분석 데이터:
-- 전체 할 일: ${total}개
-- 완료한 할 일: ${done}개
-- 전체 달성률: ${rate}%
+    const userPrompt = `분석 데이터:
+- 달성률: ${rate}% (총 ${total}개 중 ${done}개 완료)
+- 요일별/카테고리별 통계 기반 분석
 
-요일별 통계:
-${Object.entries(dayStats).map(([day, s]) => `- ${day}요일: ${s.total}개 중 ${s.done}개 완료 (${Math.round(s.done/s.total*100)}%)`).join('\n')}
-
-카테고리별 통계:
-${Object.entries(catStats).map(([cat, s]) => `- ${cat}: ${s.total}개 중 ${s.done}개 완료`).join('\n')}
-
-최근 2주 할 일 목록:
-${recentTasks.slice(0, 30).map(t => `- [${t.date}] ${t.text} (${t.completed ? '완료' : '미완료'}) [${t.category || '기타'}]`).join('\n')}
-
-위 데이터를 분석하여 인사이트와 다음 주 추천 계획을 생성해주세요.`;
+이 데이터를 바탕으로 인사이트를 작성해줘. 절대 한자나 다른 외국어를 사용하지 말고, 자연스러운 한국어로만 답변해줘.`;
 
     const raw = await callGroq(systemPrompt, userPrompt);
     const parsed = safeParseJSON(raw);
