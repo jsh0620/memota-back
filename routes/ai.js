@@ -39,16 +39,13 @@ function safeParseJSON(text) {
   return JSON.parse(cleaned);
 }
 
-function validateWeeks(weeks) {
-  if (!Array.isArray(weeks)) return false;
-  for (const week of weeks) {
-    if (!week.week || !Array.isArray(week.days)) return false;
-    if (week.days.length !== 7) return false;
-    for (const day of week.days) {
-      if (!day.day || !Array.isArray(day.tasks)) return false;
-      // 요일별 최대 2개 제한 검증
-      if (day.tasks.length > 2) day.tasks = day.tasks.slice(0, 2);
-    }
+function validateDays(days) {
+  if (!Array.isArray(days)) return false;
+  for (const day of days) {
+    if (typeof day.day !== 'number') return false;
+    if (!Array.isArray(day.tasks)) return false;
+    // 일별 최대 2개 제한
+    if (day.tasks.length > 2) day.tasks = day.tasks.slice(0, 2);
   }
   return true;
 }
@@ -56,18 +53,22 @@ function validateWeeks(weeks) {
 // ── POST /ai/plan ─────────────────────────────────────
 router.post('/plan', async (req, res) => {
   try {
-    const { goal, detail } = req.body;
+    const { goal, detail, totalDays } = req.body;
     if (!goal) return res.status(400).json({ error: '목표는 필수입니다.' });
+    if (!totalDays || totalDays < 1 || totalDays > 14) {
+      return res.status(400).json({ error: '기간은 1일~14일 사이여야 합니다.' });
+    }
 
-    const PLAN_SYSTEM = `당신은 사용자의 목표를 분석하여 실천 가능한 계획을 설계하는 전문 코치입니다.
+    const PLAN_SYSTEM = `당신은 사용자의 목표를 분석하여 실천 가능한 N일차 계획을 설계하는 전문 코치입니다.
 
 [절대 규칙]
 1. 모든 텍스트는 100% 순수 한국어(한글)로만 작성합니다. 영어 단어도 한글 발음으로 표기합니다.
 2. 반드시 유효한 JSON 형식으로만 응답합니다. 코드블록이나 설명 텍스트를 절대 붙이지 않습니다.
-3. 요일별 할 일은 최대 2개, 권장 1개로 제한합니다. 실천 가능성이 최우선입니다.
+3. 일별 할 일은 최대 2개, 권장 1개로 제한합니다. 실천 가능성이 최우선입니다.
 4. 각 할 일은 "무엇을 얼마나" 알 수 있는 구체적 행동으로 작성합니다. (나쁜 예: "공부하기" / 좋은 예: "단어 20개 암기")
-5. 각 주차의 days 배열에는 반드시 월,화,수,목,금,토,일 순서로 7개 요일 객체가 모두 있어야 합니다.
+5. days 배열에는 반드시 1일차부터 totalDays일차까지 모든 일차가 포함되어야 합니다.
 6. tasks가 없는 날도 빈 배열 []로 반드시 포함합니다.
+7. 쉬는 날(tasks:[])을 적절히 배치해 무리하지 않는 계획을 만드세요.
 
 [반려 기준 - rejected: true로 응답]
 - 목표가 단어 1~2개뿐이고 내용 파악이 불가한 경우 (예: "공부", "운동", "시험")
@@ -77,27 +78,19 @@ router.post('/plan', async (req, res) => {
 
 [정상 처리 기준]
 - 과목/분야/활동이 명시된 경우 정상 처리 (예: "토익 공부", "3킬로미터 달리기")
-- 기초 → 심화 순서로 주차를 구성하고 마지막 주차에 복습/점검 포함
-- AI가 판단한 최적 주차 수로 생성 (1~4주)
+- 초반 → 중반 → 마무리 흐름으로 구성하고 마지막 날에 복습/점검 포함
+- 전체 기간의 흐름을 고려해 점진적으로 난이도 조절
 
 [정상 응답 형식]
 {
   "rejected": false,
   "summary": "2문장 이내 계획 요약",
-  "weeks": [
-    {
-      "week": 1,
-      "theme": "이번 주 핵심 키워드 한 문장",
-      "days": [
-        { "day": "월", "tasks": ["구체적 행동 1개"] },
-        { "day": "화", "tasks": ["구체적 행동 1개"] },
-        { "day": "수", "tasks": ["구체적 행동 1개"] },
-        { "day": "목", "tasks": ["구체적 행동 1개"] },
-        { "day": "금", "tasks": ["구체적 행동 1개"] },
-        { "day": "토", "tasks": ["복습 또는 정리"] },
-        { "day": "일", "tasks": [] }
-      ]
-    }
+  "days": [
+    { "day": 1, "tasks": ["구체적 행동 1개"] },
+    { "day": 2, "tasks": ["구체적 행동 1개"] },
+    { "day": 3, "tasks": [] },
+    ...
+    { "day": N, "tasks": ["마무리 복습"] }
   ]
 }
 
@@ -107,7 +100,7 @@ router.post('/plan', async (req, res) => {
     const PLAN_FEW_SHOT = [
       {
         role: 'user',
-        content: '목표: 시험\n세부사항: 없음'
+        content: '목표: 시험\n세부사항: 없음\n기간: 7일'
       },
       {
         role: 'assistant',
@@ -118,43 +111,37 @@ router.post('/plan', async (req, res) => {
       },
       {
         role: 'user',
-        content: '목표: 매일 3킬로미터 달리기\n세부사항: 현재 운동 전혀 안 함, 아침 시간 활용'
+        content: '목표: 매일 3킬로미터 달리기\n세부사항: 현재 운동 전혀 안 함, 아침 시간 활용\n기간: 7일'
       },
       {
         role: 'assistant',
         content: JSON.stringify({
           rejected: false,
-          summary: '운동 습관이 없는 상태에서 3킬로미터 완주를 목표로 하는 4주 점진적 달리기 훈련입니다. 걷기부터 시작해 서서히 달리기 비율을 높여갑니다.',
-          weeks: [
-            {
-              week: 1, theme: '걷기와 달리기 적응',
-              days: [
-                { day: '월', tasks: ['아침 걷기 20분'] },
-                { day: '화', tasks: [] },
-                { day: '수', tasks: ['걷기 15분 후 달리기 5분'] },
-                { day: '목', tasks: [] },
-                { day: '금', tasks: ['걷기 10분 후 달리기 10분'] },
-                { day: '토', tasks: ['스트레칭 15분'] },
-                { day: '일', tasks: [] }
-              ]
-            }
+          summary: '운동 습관이 없는 상태에서 7일 동안 걷기부터 시작해 3킬로미터 달리기에 도전하는 점진적 훈련입니다.',
+          days: [
+            { day: 1, tasks: ['아침 걷기 20분'] },
+            { day: 2, tasks: ['걷기 15분 후 달리기 5분'] },
+            { day: 3, tasks: [] },
+            { day: 4, tasks: ['걷기 10분 후 달리기 10분'] },
+            { day: 5, tasks: ['달리기 15분 도전'] },
+            { day: 6, tasks: ['스트레칭 10분 + 가벼운 걷기'] },
+            { day: 7, tasks: ['3킬로미터 완주 도전'] }
           ]
         })
       }
     ];
 
-    const userPrompt = `목표: ${goal}\n세부사항: ${detail || '없음'}\n\n위 목표에 맞는 주차별 계획을 생성해줘. 요일별 할 일은 최대 2개로 제한하고, 가능하면 1개만 배치해.`;
+    const userPrompt = `목표: ${goal}\n세부사항: ${detail || '없음'}\n기간: ${totalDays}일\n\n위 목표에 맞는 ${totalDays}일치 계획을 1일차부터 ${totalDays}일차까지 생성해줘. 일별 할 일은 최대 2개로 제한하고, 가능하면 1개만 배치해. 쉬는 날도 적절히 포함해.`;
 
     const raw = await callGroq(PLAN_SYSTEM, userPrompt, 0.25, PLAN_FEW_SHOT);
     const parsed = safeParseJSON(raw);
 
     if (!parsed.rejected) {
-      if (!Array.isArray(parsed.weeks)) {
+      if (!Array.isArray(parsed.days)) {
         console.warn('/ai/plan 구조 검증 실패, raw:', raw.substring(0, 300));
         return res.status(500).json({ error: 'AI 응답 구조가 올바르지 않아요. 다시 시도해주세요.' });
       }
-      // 요일별 최대 2개 강제 적용
-      validateWeeks(parsed.weeks);
+      validateDays(parsed.days);
     }
 
     return res.json(parsed);
@@ -271,7 +258,6 @@ router.post('/analyze', async (req, res) => {
       return res.status(500).json({ error: 'AI 응답 구조가 올바르지 않아요. 다시 시도해주세요.' });
     }
 
-    // 요일별 최대 2개 강제 적용
     parsed.nextWeekPlan.days.forEach(d => {
       if (Array.isArray(d.tasks) && d.tasks.length > 2) d.tasks = d.tasks.slice(0, 2);
     });
