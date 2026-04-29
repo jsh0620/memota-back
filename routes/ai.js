@@ -137,9 +137,31 @@ router.post('/plan', async (req, res) => {
     const parsed = safeParseJSON(raw);
 
     if (!parsed.rejected) {
+      // AI가 days 대신 weeks나 plan 같은 다른 키로 줄 경우 복구 시도
       if (!Array.isArray(parsed.days)) {
-        console.warn('/ai/plan 구조 검증 실패, raw:', raw.substring(0, 300));
-        return res.status(500).json({ error: 'AI 응답 구조가 올바르지 않아요. 다시 시도해주세요.' });
+        // weeks 구조로 온 경우 days로 변환 시도
+        if (Array.isArray(parsed.weeks)) {
+          let dayNum = 1;
+          const flatDays = [];
+          for (const week of parsed.weeks) {
+            for (const day of (week.days || [])) {
+              flatDays.push({ day: dayNum++, tasks: Array.isArray(day.tasks) ? day.tasks : [] });
+            }
+          }
+          if (flatDays.length > 0) {
+            parsed.days = flatDays;
+          } else {
+            console.warn('/ai/plan 구조 복구 실패, raw:', raw.substring(0, 300));
+            return res.status(500).json({ error: 'AI 응답 구조가 올바르지 않아요. 다시 시도해주세요.' });
+          }
+        } else {
+          console.warn('/ai/plan 구조 검증 실패, raw:', raw.substring(0, 300));
+          return res.status(500).json({ error: 'AI 응답 구조가 올바르지 않아요. 다시 시도해주세요.' });
+        }
+      }
+      // days 배열 길이가 totalDays와 맞지 않으면 채워줌
+      while (parsed.days.length < totalDays) {
+        parsed.days.push({ day: parsed.days.length + 1, tasks: [] });
       }
       validateDays(parsed.days);
     }
