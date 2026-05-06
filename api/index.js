@@ -1,4 +1,4 @@
-// index.js (경로: memota-back/index.js)
+// index.js (경로: memota-back/api/index.js)
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -84,7 +84,6 @@ app.post('/auth/login', async (req, res) => {
 function authMiddleware(req, res, next) {
   const auth = req.headers.authorization;
   if (!auth) return res.status(401).json({ error: '인증 토큰 없음' });
-
   try {
     const token = auth.replace('Bearer ', '');
     req.user = jwt.verify(token, JWT_SECRET);
@@ -107,7 +106,22 @@ app.get('/tasks/:userId', authMiddleware, async (req, res) => {
     .eq('user_id', userId);
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ tasks: data || [] });
+
+  // DB 컬럼명(snake_case) → 프론트 필드명(camelCase) 변환
+  const tasks = (data || []).map((row) => ({
+    id:         row.id,
+    text:       row.text,
+    completed:  row.completed,
+    date:       row.date,
+    color:      row.color      || '#4A90D9',
+    startTime:  row.start_time || undefined,
+    endTime:    row.end_time   || undefined,
+    groupId:    row.group_id   || undefined,
+    startDate:  row.start_date || undefined,
+    endDate:    row.end_date   || undefined,
+  }));
+
+  res.json({ tasks });
 });
 
 // ── 할 일 저장 ──────────────────────────────────────
@@ -120,6 +134,7 @@ app.put('/tasks/:userId', authMiddleware, async (req, res) => {
   }
 
   try {
+    // 기존 데이터 전체 삭제 후 재삽입
     const { error: deleteError } = await supabase
       .from('tasks')
       .delete()
@@ -132,14 +147,17 @@ app.put('/tasks/:userId', authMiddleware, async (req, res) => {
         .from('tasks')
         .insert(
           tasks.map((t) => ({
-            id: t.id,
-            user_id: userId,
-            text: t.text,
-            completed: t.completed,
-            date: t.date,
-            category: t.category || '기타',
-            time: t.time || '',
-            starred: t.starred || false,
+            id:         t.id,
+            user_id:    userId,
+            text:       t.text,
+            completed:  t.completed ?? false,
+            date:       t.date,
+            color:      t.color      || '#4A90D9',
+            start_time: t.startTime  || null,
+            end_time:   t.endTime    || null,
+            group_id:   t.groupId    || null,
+            start_date: t.startDate  || null,
+            end_date:   t.endDate    || null,
           }))
         );
 
@@ -226,15 +244,14 @@ app.post('/ai/plan', authMiddleware, async (req, res) => {
 - 의미 없는 단어 나열 (예: "ㅁㄴㅇ", "asdf", "테스트")
 - 폭력적이거나 비윤리적인 내용
 
-[정상 응답 형식 - 이 구조를 정확히 따르세요]
+[정상 응답 형식]
 {
   "rejected": false,
   "summary": "2문장 이내 계획 요약 (한글만)",
   "days": [
     { "day": 1, "tasks": ["구체적 행동 (한글만)"] },
     { "day": 2, "tasks": ["구체적 행동 (한글만)"] },
-    { "day": 3, "tasks": [] },
-    { "day": 4, "tasks": ["구체적 행동 (한글만)"] }
+    { "day": 3, "tasks": [] }
   ]
 }
 
@@ -242,55 +259,10 @@ app.post('/ai/plan', authMiddleware, async (req, res) => {
 { "rejected": true, "message": "친절한 안내 메시지 (한글만)" }`;
 
     const fewShot = [
-      {
-        role: 'user',
-        content: '목표: 시험\n세부사항: 없음\n기간: 7일'
-      },
-      {
-        role: 'assistant',
-        content: JSON.stringify({
-          rejected: true,
-          message: '어떤 시험인지 알려주시면 맞춤 계획을 만들어드릴 수 있어요. 예를 들어 "토익 800점", "한국사 1급", "정보처리기사" 처럼 구체적인 시험 이름을 입력해주세요!'
-        })
-      },
-      {
-        role: 'user',
-        content: '목표: 토익 700점 달성\n세부사항: 듣기와 읽기 파트 모두 공부, 하루 1시간 가능\n기간: 5일'
-      },
-      {
-        role: 'assistant',
-        content: JSON.stringify({
-          rejected: false,
-          summary: '5일 동안 토익 듣기와 읽기를 균형 있게 공부하는 계획입니다. 매일 1시간씩 집중해서 핵심 문제 유형을 익힙니다.',
-          days: [
-            { day: 1, tasks: ['토익 듣기 단답형 문제 20개 풀기'] },
-            { day: 2, tasks: ['토익 읽기 빈칸 채우기 20문제 풀기'] },
-            { day: 3, tasks: [] },
-            { day: 4, tasks: ['토익 듣기 대화문 20개 풀기'] },
-            { day: 5, tasks: ['이번 주 오답 정리 및 단어 복습'] }
-          ]
-        })
-      },
-      {
-        role: 'user',
-        content: '목표: 매일 3킬로미터 달리기\n세부사항: 현재 운동 전혀 안 함\n기간: 7일'
-      },
-      {
-        role: 'assistant',
-        content: JSON.stringify({
-          rejected: false,
-          summary: '7일 동안 걷기부터 시작해 3킬로미터 달리기에 도전하는 점진적 훈련입니다.',
-          days: [
-            { day: 1, tasks: ['아침 걷기 20분'] },
-            { day: 2, tasks: ['걷기 15분 후 달리기 5분'] },
-            { day: 3, tasks: [] },
-            { day: 4, tasks: ['걷기 10분 후 달리기 10분'] },
-            { day: 5, tasks: ['달리기 15분 도전'] },
-            { day: 6, tasks: ['스트레칭 10분 후 가벼운 걷기'] },
-            { day: 7, tasks: ['3킬로미터 완주 도전'] }
-          ]
-        })
-      }
+      { role: 'user', content: '목표: 시험\n세부사항: 없음\n기간: 7일' },
+      { role: 'assistant', content: JSON.stringify({ rejected: true, message: '어떤 시험인지 알려주시면 맞춤 계획을 만들어드릴 수 있어요. 예를 들어 "토익 800점", "한국사 1급", "정보처리기사" 처럼 구체적인 시험 이름을 입력해주세요!' }) },
+      { role: 'user', content: '목표: 토익 700점 달성\n세부사항: 듣기와 읽기 파트 모두 공부, 하루 1시간 가능\n기간: 5일' },
+      { role: 'assistant', content: JSON.stringify({ rejected: false, summary: '5일 동안 토익 듣기와 읽기를 균형 있게 공부하는 계획입니다.', days: [{ day: 1, tasks: ['토익 듣기 단답형 문제 20개 풀기'] }, { day: 2, tasks: ['토익 읽기 빈칸 채우기 20문제 풀기'] }, { day: 3, tasks: [] }, { day: 4, tasks: ['토익 듣기 대화문 20개 풀기'] }, { day: 5, tasks: ['이번 주 오답 정리 및 단어 복습'] }] }) },
     ];
 
     const completion = await groq.chat.completions.create({
@@ -298,10 +270,7 @@ app.post('/ai/plan', authMiddleware, async (req, res) => {
       messages: [
         { role: 'system', content: systemPrompt },
         ...fewShot,
-        {
-          role: 'user',
-          content: `목표: ${goal}\n세부사항: ${detail || '없음'}\n기간: ${totalDays}일\n\n반드시 "days" 배열 구조로만 응답하세요. "weeks" 키는 절대 사용하지 마세요. day 값은 반드시 숫자(1~${totalDays})로 작성하세요. ${totalDays}일치 계획을 1일차부터 ${totalDays}일차까지 생성해줘. 모든 텍스트는 한글로만 작성하고 영어나 한자는 절대 사용하지 마세요.`
-        }
+        { role: 'user', content: `목표: ${goal}\n세부사항: ${detail || '없음'}\n기간: ${totalDays}일\n\n반드시 "days" 배열 구조로만 응답하세요. day 값은 반드시 숫자(1~${totalDays})로 작성하세요. ${totalDays}일치 계획을 1일차부터 ${totalDays}일차까지 생성해줘. 모든 텍스트는 한글로만 작성하세요.` }
       ],
       temperature: 0.25,
       max_tokens: 3000,
@@ -311,11 +280,9 @@ app.post('/ai/plan', authMiddleware, async (req, res) => {
     const text = completion.choices[0].message.content;
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('JSON 파싱 실패');
-
     const parsed = JSON.parse(jsonMatch[0]);
 
     if (!parsed.rejected) {
-      // AI가 weeks 구조로 응답한 경우 days로 변환
       if (!Array.isArray(parsed.days) && Array.isArray(parsed.weeks)) {
         let dayNum = 1;
         const flatDays = [];
@@ -327,17 +294,12 @@ app.post('/ai/plan', authMiddleware, async (req, res) => {
         parsed.days = flatDays;
         delete parsed.weeks;
       }
-
       if (!Array.isArray(parsed.days)) {
         return res.status(500).json({ error: 'AI 응답 구조가 올바르지 않아요. 다시 시도해주세요.' });
       }
-
-      // days 개수가 totalDays보다 적으면 빈 일차로 채움
       while (parsed.days.length < totalDays) {
         parsed.days.push({ day: parsed.days.length + 1, tasks: [] });
       }
-
-      // 일별 최대 2개 강제
       parsed.days.forEach(d => {
         if (Array.isArray(d.tasks) && d.tasks.length > 2) d.tasks = d.tasks.slice(0, 2);
       });
@@ -352,7 +314,6 @@ app.post('/ai/plan', authMiddleware, async (req, res) => {
 // ── AI 주간 분석 ────────────────────────────────────
 app.post('/ai/analyze', authMiddleware, async (req, res) => {
   const { tasks } = req.body;
-
   if (!tasks || !Array.isArray(tasks) || tasks.length === 0) {
     return res.status(400).json({ error: '분석할 데이터가 없습니다.' });
   }
@@ -364,15 +325,10 @@ app.post('/ai/analyze', authMiddleware, async (req, res) => {
     const now = new Date();
     const twoWeeksAgo = new Date(now);
     twoWeeksAgo.setDate(now.getDate() - 14);
-    const recentTasks = tasks.filter(t => {
-      const d = new Date(t.date);
-      return d >= twoWeeksAgo && d <= now;
-    });
-
+    const recentTasks = tasks.filter(t => { const d = new Date(t.date); return d >= twoWeeksAgo && d <= now; });
     const total = recentTasks.length;
     const done  = recentTasks.filter(t => t.completed).length;
     const rate  = total > 0 ? Math.round((done / total) * 100) : 0;
-
     const DAY_KR = ['일', '월', '화', '수', '목', '금', '토'];
     const dayStats = {};
     recentTasks.forEach(t => {
@@ -383,60 +339,28 @@ app.post('/ai/analyze', authMiddleware, async (req, res) => {
     });
 
     const systemPrompt = `당신은 개인 생산성 코치 AI입니다.
-
 [절대 규칙]
 1. 모든 텍스트는 100% 순수 한국어(한글)로만 작성합니다.
-2. 반드시 유효한 JSON 형식으로만 응답합니다. 코드블록이나 설명을 절대 붙이지 않습니다.
-3. 요일별 할 일은 최대 2개, 권장 1개로 제한합니다.
-4. nextWeekPlan의 days 배열에는 반드시 월,화,수,목,금,토,일 순서로 7개 요일 객체가 모두 있어야 합니다.
-5. tasks가 없는 날도 빈 배열 []로 반드시 포함합니다.
-6. 톤은 따뜻하고 격려하는 말투를 사용합니다.
-
+2. 반드시 유효한 JSON 형식으로만 응답합니다.
+3. 톤은 따뜻하고 격려하는 말투를 사용합니다.
 [응답 형식]
-{
-  "insights": ["인사이트 1", "인사이트 2", "다음 주 전략"],
-  "bestDay": "월요일",
-  "weakDay": "금요일",
-  "nextWeekPlan": {
-    "theme": "다음 주 핵심 목표 한 문장",
-    "days": [
-      { "day": "월", "tasks": ["구체적 행동 1개"] },
-      { "day": "화", "tasks": [] },
-      { "day": "수", "tasks": ["구체적 행동 1개"] },
-      { "day": "목", "tasks": [] },
-      { "day": "금", "tasks": ["구체적 행동 1개"] },
-      { "day": "토", "tasks": [] },
-      { "day": "일", "tasks": [] }
-    ]
-  }
-}`;
+{ "insights": ["인사이트 1", "인사이트 2", "다음 주 전략"], "bestDay": "월요일", "weakDay": "금요일" }`;
 
     const completion = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: `분석 데이터:\n- 전체 달성률: ${rate}% (총 ${total}개 중 ${done}개 완료)\n- 요일별 통계: ${JSON.stringify(dayStats)}\n- 최근 2주 할 일: ${JSON.stringify(recentTasks.map(t => ({ date: t.date, text: t.text, completed: t.completed })))}\n\n요일별 할 일은 최대 2개, 가능하면 1개만 배치해줘.` }
+        { role: 'user', content: `분석 데이터:\n- 전체 달성률: ${rate}% (총 ${total}개 중 ${done}개 완료)\n- 요일별 통계: ${JSON.stringify(dayStats)}` }
       ],
       temperature: 0.35,
-      max_tokens: 2000,
+      max_tokens: 1000,
       response_format: { type: 'json_object' },
     });
 
     const text = completion.choices[0].message.content;
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('JSON 파싱 실패');
-
     const parsed = JSON.parse(jsonMatch[0]);
-
-    // 요일별 최대 2개 강제 적용
-    if (parsed.nextWeekPlan?.days) {
-      parsed.nextWeekPlan.days.forEach(d => {
-        if (Array.isArray(d.tasks) && d.tasks.length > 2) {
-          d.tasks = d.tasks.slice(0, 2);
-        }
-      });
-    }
-
     res.json({ ...parsed, rate });
   } catch (err) {
     res.status(500).json({ error: 'AI 오류: ' + err.message });
