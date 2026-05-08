@@ -139,46 +139,51 @@ app.put('/tasks/:userId', authMiddleware, async (req, res) => {
   }
 
   try {
+    // 1. 저장할 데이터 준비
+    const dbTasks = tasks.map((t) => ({
+      id: t.id, // 프론트에서 생성한 UUID나 고유 ID가 있어야 합니다.
+      user_id: userId,
+      text: t.text,
+      completed: t.completed,
+      date: t.date,
+      category: t.category || '기타',
+      time: t.time || '',
+      starred: t.starred || false,
+      color: t.color || null,
+      start_date: t.startDate || null,
+      end_date: t.endDate || null,
+      start_time: t.startTime || null,
+      end_time: t.endTime || null,
+      files: t.files || [], // JSONB 타입 권장
+      group_id: t.groupId || null,
+    }));
+
+    // 2. 먼저 upsert 실행 (기존 데이터 삭제 전에 새 데이터를 업데이트/삽입)
+    // 이 단계에서 에러가 나면 아래의 delete 로직이 실행되지 않아 데이터 유실을 방지합니다.
+    if (dbTasks.length > 0) {
+      const { error: upsertError } = await supabase
+        .from('tasks')
+        .upsert(dbTasks, { onConflict: 'id' }); 
+
+      if (upsertError) throw upsertError;
+    }
+
+    // 3. 현재 프론트엔드 리스트에 없는 데이터(삭제된 항목)만 골라 삭제
+    const currentIds = tasks.map(t => t.id);
     const { error: deleteError } = await supabase
       .from('tasks')
       .delete()
-      .eq('user_id', userId);
+      .eq('user_id', userId)
+      .not('id', 'in', `(${currentIds.join(',')})`); // 리스트에 없는 ID만 삭제
 
     if (deleteError) throw deleteError;
 
-    if (tasks.length > 0) {
-      // ✅ 프론트엔드 → DB 필드명 변환
-      const dbTasks = tasks.map((t) => ({
-        id: t.id,
-        user_id: userId,
-        text: t.text,
-        completed: t.completed,
-        date: t.date,
-        category: t.category || '기타',
-        time: t.time || '',
-        starred: t.starred || false,
-        color: t.color || null,
-        start_date: t.startDate || null,
-        end_date: t.endDate || null,
-        start_time: t.startTime || null,
-        end_time: t.endTime || null,
-        files: t.files || [],
-        group_id: t.groupId || null,
-      }));
-
-      const { error: insertError } = await supabase
-        .from('tasks')
-        .insert(dbTasks);
-
-      if (insertError) throw insertError;
-    }
-
     res.json({ ok: true });
   } catch (err) {
+    console.error('Save Error:', err.message);
     res.status(500).json({ error: '저장 실패: ' + err.message });
   }
 });
-
 // ── 보관함 조회 ─────────────────────────────────────
 app.get('/archive/:userId', authMiddleware, async (req, res) => {
   try {
