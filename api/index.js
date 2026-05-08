@@ -136,9 +136,9 @@ app.put('/tasks/:userId', authMiddleware, async (req, res) => {
   }
 
   try {
-    // 1. 저장할 데이터 준비
+    // 1. DB 구조에 맞게 데이터 변환 (테이블에 없는 category, time, starred 제거)
     const dbTasks = tasks.map((t) => ({
-      id: t.id, // 프론트에서 생성한 UUID나 고유 ID가 있어야 합니다.
+      id: t.id,
       user_id: userId,
       text: t.text,
       completed: t.completed,
@@ -148,27 +148,26 @@ app.put('/tasks/:userId', authMiddleware, async (req, res) => {
       end_date: t.endDate || null,
       start_time: t.startTime || null,
       end_time: t.endTime || null,
-      files: t.files || [], // JSONB 타입 권장
+      files: t.files || [], // jsonb 타입
       group_id: t.groupId || null,
     }));
 
-    // 2. 먼저 upsert 실행 (기존 데이터 삭제 전에 새 데이터를 업데이트/삽입)
-    // 이 단계에서 에러가 나면 아래의 delete 로직이 실행되지 않아 데이터 유실을 방지합니다.
+    // 2. Upsert 실행: ID가 같으면 업데이트, 없으면 삽입 (데이터 유실 방지)
     if (dbTasks.length > 0) {
       const { error: upsertError } = await supabase
         .from('tasks')
-        .upsert(dbTasks, { onConflict: 'id' }); 
+        .upsert(dbTasks, { onConflict: 'id' });
 
       if (upsertError) throw upsertError;
     }
 
-    // 3. 현재 프론트엔드 리스트에 없는 데이터(삭제된 항목)만 골라 삭제
+    // 3. 삭제 처리: 현재 전달받은 목록에 없는 ID들만 DB에서 삭제
     const currentIds = tasks.map(t => t.id);
     const { error: deleteError } = await supabase
       .from('tasks')
       .delete()
       .eq('user_id', userId)
-      .not('id', 'in', `(${currentIds.join(',')})`); // 리스트에 없는 ID만 삭제
+      .not('id', 'in', `(${currentIds.join(',')})`);
 
     if (deleteError) throw deleteError;
 
@@ -178,6 +177,7 @@ app.put('/tasks/:userId', authMiddleware, async (req, res) => {
     res.status(500).json({ error: '저장 실패: ' + err.message });
   }
 });
+
 // ── 보관함 조회 ─────────────────────────────────────
 app.get('/archive/:userId', authMiddleware, async (req, res) => {
   try {
