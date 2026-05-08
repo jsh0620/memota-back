@@ -1,4 +1,4 @@
-// index.js (경로: memota-back/index.js)
+// index.js (경로: memota-back/api/index.js)
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -8,7 +8,7 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 
 app.use(cors({ origin: '*' }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // ← 파일 데이터를 위해 limit 증가
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -107,7 +107,26 @@ app.get('/tasks/:userId', authMiddleware, async (req, res) => {
     .eq('user_id', userId);
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ tasks: data || [] });
+  
+  // ✅ DB → 프론트엔드 필드명 변환
+  const tasks = (data || []).map(row => ({
+    id: row.id,
+    text: row.text,
+    completed: row.completed,
+    date: row.date,
+    category: row.category,
+    time: row.time,
+    starred: row.starred,
+    color: row.color,
+    startDate: row.start_date,
+    endDate: row.end_date,
+    startTime: row.start_time,
+    endTime: row.end_time,
+    files: row.files || [],
+    groupId: row.group_id,
+  }));
+  
+  res.json({ tasks });
 });
 
 // ── 할 일 저장 ──────────────────────────────────────
@@ -128,20 +147,28 @@ app.put('/tasks/:userId', authMiddleware, async (req, res) => {
     if (deleteError) throw deleteError;
 
     if (tasks.length > 0) {
+      // ✅ 프론트엔드 → DB 필드명 변환
+      const dbTasks = tasks.map((t) => ({
+        id: t.id,
+        user_id: userId,
+        text: t.text,
+        completed: t.completed,
+        date: t.date,
+        category: t.category || '기타',
+        time: t.time || '',
+        starred: t.starred || false,
+        color: t.color || null,
+        start_date: t.startDate || null,
+        end_date: t.endDate || null,
+        start_time: t.startTime || null,
+        end_time: t.endTime || null,
+        files: t.files || [],
+        group_id: t.groupId || null,
+      }));
+
       const { error: insertError } = await supabase
         .from('tasks')
-        .insert(
-          tasks.map((t) => ({
-            id: t.id,
-            user_id: userId,
-            text: t.text,
-            completed: t.completed,
-            date: t.date,
-            category: t.category || '기타',
-            time: t.time || '',
-            starred: t.starred || false,
-          }))
-        );
+        .insert(dbTasks);
 
       if (insertError) throw insertError;
     }
