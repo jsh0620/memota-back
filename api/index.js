@@ -309,7 +309,7 @@ app.post('/ai/plan', authMiddleware, async (req, res) => {
           days: [
             { day: 1, tasks: ['아침 걷기 20분'] },
             { day: 2, tasks: ['걷기 15분 후 달리기 5분'] },
-            { day: 3, tasks: [] },
+            { day: 3, tasks: ['1킬로미터 완주 도전'] },
             { day: 4, tasks: ['걷기 10분 후 달리기 10분'] },
             { day: 5, tasks: ['달리기 15분 도전'] },
             { day: 6, tasks: ['스트레칭 10분 후 가벼운 걷기'] },
