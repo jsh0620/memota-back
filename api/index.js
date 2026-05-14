@@ -198,26 +198,6 @@ app.get('/archive/:userId', authMiddleware, async (req, res) => {
   }
 });
 
-// ── 보관함 저장 ─────────────────────────────────────
-app.put('/archive/:userId', authMiddleware, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { archive } = req.body;
-
-    const { error } = await supabase
-      .from('archives')
-      .upsert(
-        { user_id: userId, archive_data: archive },
-        { onConflict: 'user_id' }
-      );
-
-    if (error) return res.status(500).json({ error: '저장 실패' });
-    return res.json({ success: true });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
 // ── AI 계획 생성 ────────────────────────────────────
 app.post('/ai/plan', authMiddleware, async (req, res) => {
   const { goal, detail, totalDays } = req.body;
