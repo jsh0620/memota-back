@@ -448,6 +448,45 @@ app.post('/ai/analyze', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'AI 오류: ' + err.message });
   }
 });
+// ── Storage 파일 삭제 ────────────────────────────────
+app.delete('/files/delete', authMiddleware, async (req, res) => {
+  const { urls } = req.body;
+
+  if (!urls || !Array.isArray(urls) || urls.length === 0) {
+    return res.status(400).json({ error: 'urls 배열이 필요합니다.' });
+  }
+
+  try {
+    const BUCKET = 'task-files';
+
+    // URL에서 Storage 경로 추출
+    // 예: https://xxx.supabase.co/storage/v1/object/public/task-files/userId/taskId/file.jpg
+    //     → userId/taskId/file.jpg
+    const paths = urls.map(url => {
+      const marker = '/' + BUCKET + '/';
+      const idx = url.indexOf(marker);
+      if (idx === -1) return null;
+      return url.slice(idx + marker.length);
+    }).filter(Boolean);
+
+    if (paths.length === 0) {
+      return res.status(400).json({ error: '유효한 파일 경로가 없습니다.' });
+    }
+
+    const { error } = await supabase.storage.from(BUCKET).remove(paths);
+
+    if (error) {
+      console.error('Storage 삭제 오류:', error);
+      return res.status(500).json({ error: 'Storage 삭제 실패: ' + error.message });
+    }
+
+    console.log('✅ Storage 파일 삭제 완료:', paths);
+    res.json({ ok: true, deleted: paths });
+  } catch (err) {
+    console.error('파일 삭제 에러:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`memota-back running on port ${PORT}`));
