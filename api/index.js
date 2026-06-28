@@ -4,6 +4,8 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
 
@@ -16,6 +18,16 @@ const supabase = createClient(
 );
 
 const JWT_SECRET = process.env.JWT_SECRET || 'memota-secret-key';
+
+// ── AWS S3 클라이언트 설정 ──────────────────────────
+const s3 = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+});
+const S3_BUCKET = process.env.AWS_S3_BUCKET;
 
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'memota-back running' });
@@ -448,42 +460,85 @@ app.post('/ai/analyze', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'AI 오류: ' + err.message });
   }
 });
-// ── Storage 파일 삭제 ────────────────────────────────
-app.delete('/files/delete', authMiddleware, async (req, res) => {
-  const { urls } = req.body;
 
-  if (!urls || !Array.isArray(urls) || urls.length === 0) {
-    return res.status(400).json({ error: 'urls 배열이 필요합니다.' });
+// ── [S3] 업로드용 Presigned URL 발급 ────────────────
+// 프론트가 이 URL을 받아서 S3에 "직접" 파일을 PUT 업로드함 (백엔드를 경유하지 않음)
+app.post('/files/upload-url', authMiddleware, async (req, res) => {
+  const { taskId, fileName, contentType } = req.body;
+  const userId = req.user.userId;
+
+  if (!taskId || !fileName) {
+    return res.status(400).json({ error: 'taskId, fileName이 필요합니다.' });
   }
 
   try {
-    const BUCKET = 'task-files';
+    const ext = (fileName.split('.').pop() || '').toLowerCase();
+    const safeFileName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext ? '.' + ext : ''}`;
+    const key = `${userId}/${taskId}/${safeFileName}`;
 
-    // URL에서 Storage 경로 추출
-    // 예: https://xxx.supabase.co/storage/v1/object/public/task-files/userId/taskId/file.jpg
-    //     → userId/taskId/file.jpg
-    const paths = urls.map(url => {
-      const marker = '/' + BUCKET + '/';
-      const idx = url.indexOf(marker);
-      if (idx === -1) return null;
-      return url.slice(idx + marker.length);
-    }).filter(Boolean);
+    const command = new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      ContentType: contentType || 'application/octet-stream',
+    });
 
-    if (paths.length === 0) {
-      return res.status(400).json({ error: '유효한 파일 경로가 없습니다.' });
-    }
+    // 5분 동안만 유효한 업로드 주소 (업로드는 보통 금방 끝나므로 짧게 설정)
+    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 300 });
 
-    const { error } = await supabase.storage.from(BUCKET).remove(paths);
-
-    if (error) {
-      console.error('Storage 삭제 오류:', error);
-      return res.status(500).json({ error: 'Storage 삭제 실패: ' + error.message });
-    }
-
-    console.log('✅ Storage 파일 삭제 완료:', paths);
-    res.json({ ok: true, deleted: paths });
+    res.json({ uploadUrl, key });
   } catch (err) {
-    console.error('파일 삭제 에러:', err);
+    console.error('업로드 URL 발급 실패:', err);
+    res.status(500).json({ error: '업로드 URL 발급 실패: ' + err.message });
+  }
+});
+
+// ── [S3] 조회/다운로드용 Presigned URL 발급 ─────────
+// key 배열을 받아서, 각각에 대해 "1시간 동안 열람 가능한" 임시 URL을 발급
+app.post('/files/get-url', authMiddleware, async (req, res) => {
+  const { keys } = req.body;
+
+  if (!keys || !Array.isArray(keys) || keys.length === 0) {
+    return res.status(400).json({ error: 'keys 배열이 필요합니다.' });
+  }
+
+  try {
+    const results = await Promise.all(
+      keys.map(async (key) => {
+        const command = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key });
+        const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1시간
+        return { key, url };
+      })
+    );
+
+    res.json({ urls: results });
+  } catch (err) {
+    console.error('조회 URL 발급 실패:', err);
+    res.status(500).json({ error: '조회 URL 발급 실패: ' + err.message });
+  }
+});
+
+// ── [S3] 파일 삭제 ───────────────────────────────────
+app.delete('/files/delete', authMiddleware, async (req, res) => {
+  const { keys } = req.body;
+
+  if (!keys || !Array.isArray(keys) || keys.length === 0) {
+    return res.status(400).json({ error: 'keys 배열이 필요합니다.' });
+  }
+
+  try {
+    const command = new DeleteObjectsCommand({
+      Bucket: S3_BUCKET,
+      Delete: {
+        Objects: keys.map(key => ({ Key: key })),
+      },
+    });
+
+    const result = await s3.send(command);
+
+    console.log('✅ S3 파일 삭제 완료:', keys);
+    res.json({ ok: true, deleted: keys, errors: result.Errors || [] });
+  } catch (err) {
+    console.error('S3 파일 삭제 에러:', err);
     res.status(500).json({ error: err.message });
   }
 });
