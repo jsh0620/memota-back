@@ -110,6 +110,60 @@ app.get('/auth/me', authMiddleware, (req, res) => {
   res.json({ user: req.user });
 });
 
+// ── [S3] presigned URL에서 key(경로) 추출 ───────────
+// 예: https://memota-files.s3.ap-northeast-2.amazonaws.com/userId/taskId/file.jpg?X-Amz-...
+//     → userId/taskId/file.jpg
+// ⚠️ 저장된 url이 오래돼서 만료됐어도, 경로(key) 부분은 절대 안 바뀌므로 항상 추출 가능함
+function extractS3KeyFromUrl(url) {
+  try {
+    const u = new URL(url);
+    return decodeURIComponent(u.pathname.replace(/^\//, ''));
+  } catch {
+    return null;
+  }
+}
+
+// ── [S3] tasks 배열 안의 모든 첨부파일 url을 "방금 발급한 새 URL"로 교체 ──
+// DB에는 예전에 저장된(만료됐을 수도 있는) url이 들어있지만,
+// 할 일을 "불러올 때마다" 항상 새로 1시간짜리 URL로 갈아끼워서 보내줌
+// → 프론트엔드는 url 만료를 전혀 신경 쓸 필요가 없어짐
+async function refreshFileUrls(tasks) {
+  const keySet = new Set();
+  tasks.forEach(t => {
+    (t.files || []).forEach(f => {
+      const key = extractS3KeyFromUrl(f.url);
+      if (key) keySet.add(key);
+    });
+  });
+
+  if (keySet.size === 0) return tasks;
+
+  const keys = Array.from(keySet);
+  const urlMap = {};
+
+  await Promise.all(keys.map(async (key) => {
+    try {
+      const command = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key });
+      const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1시간
+      urlMap[key] = url;
+    } catch (e) {
+      console.error('파일 URL 갱신 실패 (무시하고 계속):', key, e.message);
+    }
+  }));
+
+  return tasks.map(t => {
+    if (!t.files || t.files.length === 0) return t;
+    return {
+      ...t,
+      files: t.files.map(f => {
+        const key = extractS3KeyFromUrl(f.url);
+        const freshUrl = key && urlMap[key] ? urlMap[key] : f.url;
+        return { ...f, url: freshUrl };
+      }),
+    };
+  });
+}
+
 // ── 할 일 조회 ──────────────────────────────────────
 app.get('/tasks/:userId', authMiddleware, async (req, res) => {
   const { userId } = req.params;
@@ -121,7 +175,7 @@ app.get('/tasks/:userId', authMiddleware, async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   
   // ✅ DB → 프론트엔드 필드명 변환
-  const tasks = (data || []).map(row => ({
+  let tasks = (data || []).map(row => ({
     id: row.id,
     text: row.text,
     completed: row.completed,
@@ -134,6 +188,9 @@ app.get('/tasks/:userId', authMiddleware, async (req, res) => {
     files: row.files || [],
     groupId: row.group_id,
   }));
+
+  // ✅ 첨부파일이 있으면 항상 새 presigned URL로 갈아끼워서 응답
+  tasks = await refreshFileUrls(tasks);
   
   res.json({ tasks });
 });
