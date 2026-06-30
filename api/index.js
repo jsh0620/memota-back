@@ -4,7 +4,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
@@ -34,12 +34,16 @@ app.get('/', (req, res) => {
 });
 
 app.post('/auth/register', async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password, securityQuestion, securityAnswer } = req.body;
 
   if (!username || username.length < 3)
     return res.status(400).json({ error: '아이디는 3자 이상이어야 합니다.' });
   if (!password || password.length < 6)
     return res.status(400).json({ error: '비밀번호는 6자 이상이어야 합니다.' });
+  if (!securityQuestion || securityQuestion.trim().length < 2)
+    return res.status(400).json({ error: '비밀번호 찾기 질문을 입력해주세요.' });
+  if (!securityAnswer || securityAnswer.trim().length < 1)
+    return res.status(400).json({ error: '비밀번호 찾기 답변을 입력해주세요.' });
 
   const { data: existing } = await supabase
     .from('profiles')
@@ -51,10 +55,18 @@ app.post('/auth/register', async (req, res) => {
     return res.status(409).json({ error: '이미 사용 중인 아이디입니다.' });
 
   const hashedPassword = await bcrypt.hash(password, 10);
+  // ✅ 답변은 대소문자/공백 차이로 인한 불일치를 막기 위해 정규화 후 해시 저장
+  const normalizedAnswer = securityAnswer.trim().toLowerCase();
+  const hashedAnswer = await bcrypt.hash(normalizedAnswer, 10);
 
   const { data, error } = await supabase
     .from('profiles')
-    .insert([{ username, password: hashedPassword }])
+    .insert([{
+      username,
+      password: hashedPassword,
+      security_question: securityQuestion.trim(),
+      security_answer: hashedAnswer,
+    }])
     .select()
     .single();
 
@@ -66,6 +78,59 @@ app.post('/auth/register', async (req, res) => {
   });
 
   res.json({ token, user: { id: data.id, username } });
+});
+
+// ── 비밀번호 재설정 1단계: 아이디로 보안질문 조회 ──────
+app.post('/auth/find-question', async (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: '아이디를 입력해주세요.' });
+
+  const { data: user } = await supabase
+    .from('profiles')
+    .select('security_question')
+    .eq('username', username)
+    .single();
+
+  // ⚠️ 존재 여부를 굳이 구분해서 알려주지 않음 (아이디 존재 여부 추측 방지)
+  if (!user || !user.security_question)
+    return res.status(404).json({ error: '아이디 또는 등록된 보안질문 정보를 찾을 수 없습니다.' });
+
+  res.json({ question: user.security_question });
+});
+
+// ── 비밀번호 재설정 2단계: 답변 검증 후 새 비밀번호로 변경 ──
+app.post('/auth/reset-password', async (req, res) => {
+  const { username, securityAnswer, newPassword } = req.body;
+
+  if (!username || !securityAnswer || !newPassword)
+    return res.status(400).json({ error: '필요한 정보가 모두 입력되지 않았습니다.' });
+  if (newPassword.length < 6)
+    return res.status(400).json({ error: '비밀번호는 6자 이상이어야 합니다.' });
+
+  const { data: user } = await supabase
+    .from('profiles')
+    .select('id, security_answer')
+    .eq('username', username)
+    .single();
+
+  if (!user || !user.security_answer)
+    return res.status(404).json({ error: '아이디 또는 보안질문 정보를 찾을 수 없습니다.' });
+
+  const normalizedAnswer = securityAnswer.trim().toLowerCase();
+  const isValid = await bcrypt.compare(normalizedAnswer, user.security_answer);
+  if (!isValid)
+    return res.status(401).json({ error: '답변이 일치하지 않습니다.' });
+
+  const hashedPassword = await bcrypt.hash(newPassword, 10);
+  const { error: updateError } = await supabase
+    .from('profiles')
+    .update({ password: hashedPassword })
+    .eq('id', user.id);
+
+  if (updateError)
+    return res.status(500).json({ error: '비밀번호 변경 실패: ' + updateError.message });
+
+  res.json({ ok: true });
 });
 
 app.post('/auth/login', async (req, res) => {
@@ -108,6 +173,68 @@ function authMiddleware(req, res, next) {
 
 app.get('/auth/me', authMiddleware, (req, res) => {
   res.json({ user: req.user });
+});
+
+// ── 회원탈퇴: S3 파일 전부 + DB 데이터(tasks, date_emojis, profiles) 전부 삭제 ──
+app.delete('/auth/withdraw', authMiddleware, async (req, res) => {
+  const userId = req.user.userId;
+
+  try {
+    // 1. S3에서 해당 유저 폴더(userId/...) 안의 모든 파일 목록 조회 후 전부 삭제
+    let continuationToken = undefined;
+    const allKeys = [];
+    do {
+      const listCommand = new ListObjectsV2Command({
+        Bucket: S3_BUCKET,
+        Prefix: `${userId}/`,
+        ContinuationToken: continuationToken,
+      });
+      const listResult = await s3.send(listCommand);
+      (listResult.Contents || []).forEach(obj => allKeys.push(obj.Key));
+      continuationToken = listResult.IsTruncated ? listResult.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    if (allKeys.length > 0) {
+      // DeleteObjectsCommand는 한 번에 최대 1000개까지 가능 → 1000개씩 나눠서 삭제
+      for (let i = 0; i < allKeys.length; i += 1000) {
+        const chunk = allKeys.slice(i, i + 1000);
+        await s3.send(new DeleteObjectsCommand({
+          Bucket: S3_BUCKET,
+          Delete: { Objects: chunk.map(key => ({ Key: key })) },
+        }));
+      }
+    }
+
+    // 2. date_emojis 삭제
+    const { error: emojiError } = await supabase
+      .from('date_emojis')
+      .delete()
+      .eq('user_id', userId);
+    if (emojiError) throw emojiError;
+
+    // 3. tasks 삭제
+    const { error: tasksError } = await supabase
+      .from('tasks')
+      .delete()
+      .eq('user_id', userId);
+    if (tasksError) throw tasksError;
+
+    // 4. archives 삭제 (있을 경우)
+    await supabase.from('archives').delete().eq('user_id', userId);
+
+    // 5. profiles 삭제 (아이디/비밀번호 포함 계정 정보 완전 삭제)
+    const { error: profileError } = await supabase
+      .from('profiles')
+      .delete()
+      .eq('id', userId);
+    if (profileError) throw profileError;
+
+    console.log(`✅ 회원탈퇴 완료 (userId: ${userId}, 삭제된 S3 파일: ${allKeys.length}개)`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('회원탈퇴 처리 실패:', err.message);
+    res.status(500).json({ error: '회원탈퇴 처리 중 오류가 발생했습니다: ' + err.message });
+  }
 });
 
 // ── [S3] presigned URL에서 key(경로) 추출 ───────────
