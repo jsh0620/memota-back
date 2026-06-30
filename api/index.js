@@ -98,7 +98,31 @@ app.post('/auth/find-question', async (req, res) => {
   res.json({ question: user.security_question });
 });
 
-// ── 비밀번호 재설정 2단계: 답변 검증 후 새 비밀번호로 변경 ──
+// ── 비밀번호 재설정 2단계: 답변만 먼저 검증 (비밀번호 입력 전) ──
+app.post('/auth/verify-answer', async (req, res) => {
+  const { username, securityAnswer } = req.body;
+
+  if (!username || !securityAnswer)
+    return res.status(400).json({ error: '필요한 정보가 모두 입력되지 않았습니다.' });
+
+  const { data: user } = await supabase
+    .from('profiles')
+    .select('id, security_answer')
+    .eq('username', username)
+    .single();
+
+  if (!user || !user.security_answer)
+    return res.status(404).json({ error: '아이디 또는 보안질문 정보를 찾을 수 없습니다.' });
+
+  const normalizedAnswer = securityAnswer.trim().toLowerCase();
+  const isValid = await bcrypt.compare(normalizedAnswer, user.security_answer);
+  if (!isValid)
+    return res.status(401).json({ error: '답변이 일치하지 않습니다.' });
+
+  res.json({ ok: true });
+});
+
+// ── 비밀번호 재설정 3단계: 답변 재검증 후 새 비밀번호로 변경 ──
 app.post('/auth/reset-password', async (req, res) => {
   const { username, securityAnswer, newPassword } = req.body;
 
@@ -178,8 +202,26 @@ app.get('/auth/me', authMiddleware, (req, res) => {
 // ── 회원탈퇴: S3 파일 전부 + DB 데이터(tasks, date_emojis, profiles) 전부 삭제 ──
 app.delete('/auth/withdraw', authMiddleware, async (req, res) => {
   const userId = req.user.userId;
+  const { password } = req.body;
+
+  if (!password)
+    return res.status(400).json({ error: '비밀번호를 입력해주세요.' });
 
   try {
+    // 0. 본인 확인: 현재 로그인 비밀번호 검증
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('password')
+      .eq('id', userId)
+      .single();
+
+    if (!profile)
+      return res.status(404).json({ error: '계정 정보를 찾을 수 없습니다.' });
+
+    const isValid = await bcrypt.compare(password, profile.password);
+    if (!isValid)
+      return res.status(401).json({ error: '비밀번호가 일치하지 않습니다.' });
+
     // 1. S3에서 해당 유저 폴더(userId/...) 안의 모든 파일 목록 조회 후 전부 삭제
     let continuationToken = undefined;
     const allKeys = [];
