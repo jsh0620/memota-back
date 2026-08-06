@@ -437,57 +437,117 @@ app.get('/archive/:userId', authMiddleware, async (req, res) => {
 });
 
 // ── AI 계획 생성 ────────────────────────────────────
-// ── AI 하루형 플랜 ────────────────────────────────────
-app.post('/ai/day-plan', authMiddleware, async (req, res) => {
-  const { wakeTime, sleepTime, goals, timeWeights } = req.body;
-  if (!goals || !goals.trim()) return res.status(400).json({ error: '오늘 할 일을 입력해주세요.' });
+app.post('/ai/plan', authMiddleware, async (req, res) => {
+  const { goal, detail, totalDays } = req.body;
+
+  if (!goal) return res.status(400).json({ error: '목표를 입력해주세요.' });
+  if (!totalDays || totalDays < 1 || totalDays > 14) {
+    return res.status(400).json({ error: '기간은 1일~14일 사이여야 합니다.' });
+  }
 
   try {
     const Groq = require('groq-sdk');
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-    // 가중치 → 한글 설명으로 변환
-    const weightDesc = Object.entries(timeWeights || {})
-      .map(([slot, w]) => `${slot}(${w})`)
-      .join(', ');
+    const systemPrompt = `당신은 사용자의 목표를 분석하여 실천 가능한 N일차 계획을 설계하는 전문 코치입니다.
 
-    const systemPrompt = `당신은 하루 일과 전체를 설계하는 전문 플래너입니다.
+[절대 규칙 - 반드시 지켜야 함]
+1. 모든 텍스트는 100% 순수 한국어(한글)로만 작성합니다.
+   - 영어 단어(예: LC, RC, Part, Test)는 절대 사용 금지. 반드시 한글로 표기하세요.
+   - 한자(예: 重点, 基本) 사용 절대 금지.
+   - 영어가 포함된 고유명사도 한글 발음으로 표기하세요. (예: TOEIC → 토익, LC → 듣기, RC → 읽기)
+2. 반드시 유효한 JSON 형식으로만 응답합니다. 코드블록이나 설명 텍스트를 절대 붙이지 않습니다.
+3. 응답의 최상위 키는 반드시 "rejected", "summary", "days" 세 가지만 사용합니다. "weeks" 키는 절대 사용하지 마세요.
+4. "days"는 반드시 배열(array) 형태이며, 각 원소는 {"day": 숫자, "tasks": [문자열]} 형식입니다.
+5. day 값은 반드시 숫자(1, 2, 3...)여야 합니다. 문자열("월", "화" 등) 사용 금지.
+6. 일별 할 일은 최대 2개, 권장 1개로 제한합니다.
+7. 각 할 일은 구체적 행동으로 작성합니다. (나쁜 예: "공부하기" / 좋은 예: "단어 20개 암기")
+8. tasks가 없는 날도 빈 배열 []로 반드시 포함합니다.
 
-[절대 규칙]
-1. 모든 텍스트는 100% 한국어(한글)로만 작성합니다. 영어·한자 사용 절대 금지.
-2. 반드시 유효한 JSON만 응답합니다. 코드블록·설명 없이 JSON만.
-3. 응답 최상위 키: "rejected", "tasks" 두 가지만.
-4. tasks 배열 각 원소: { "timeSlot": "오전|점심|오후|밤|새벽", "time": "HH:MM", "text": "구체적 행동" }
-5. time은 24시간제 HH:MM 형식 (예: 07:30, 14:00).
-6. 기상~취침 시간 범위 내에서만 일정을 배치합니다.
-7. 가중치가 "높음"인 시간대에는 중요도 높은 핵심 작업을 배치합니다.
-8. 가중치가 "낮음"인 시간대에는 가벼운 작업이나 휴식을 배치합니다.
-9. 가중치가 "없음"인 시간대는 일정을 배치하지 않습니다.
-10. 식사(아침/점심/저녁), 이동, 휴식 등 기본 생활 일과도 포함하세요.
-11. 각 항목은 15~30분 단위로 구체적으로 작성합니다.
+[반려 기준 - rejected: true로 응답]
+- 목표가 단어 1~2개뿐이고 내용 파악이 불가한 경우 (예: "공부", "운동", "시험")
+- 무엇을 할지 대상이 전혀 없는 경우 (예: "열심히 살기", "잘 되고 싶다")
+- 의미 없는 단어 나열 (예: "ㅁㄴㅇ", "asdf", "테스트")
+- 폭력적이거나 비윤리적인 내용
 
-[반려 기준 - rejected: true]
-- 입력 내용이 너무 짧거나 의미 불명확한 경우
+[정상 응답 형식 - 이 구조를 정확히 따르세요]
+{
+  "rejected": false,
+  "summary": "2문장 이내 계획 요약 (한글만)",
+  "days": [
+    { "day": 1, "tasks": ["구체적 행동 (한글만)"] },
+    { "day": 2, "tasks": ["구체적 행동 (한글만)"] },
+    { "day": 3, "tasks": [] },
+    { "day": 4, "tasks": ["구체적 행동 (한글만)"] }
+  ]
+}
 
-[정상 응답 형식]
-{ "rejected": false, "tasks": [ { "timeSlot": "오전", "time": "07:00", "text": "기상 및 스트레칭 10분" }, ... ] }
+[반려 응답 형식]
+{ "rejected": true, "message": "친절한 안내 메시지 (한글만)" }`;
 
-[반려 형식]
-{ "rejected": true, "message": "안내 메시지" }`;
-
-    const userContent = `기상: ${wakeTime || '07:00'}, 취침: ${sleepTime || '23:00'}
-시간대 가중치: ${weightDesc}
-오늘 해야 할 일: ${goals}
-
-위 조건에 맞게 기상부터 취침까지 하루 전체 일과를 세세하게 계획해줘. 반드시 JSON만 응답.`;
+    const fewShot = [
+      {
+        role: 'user',
+        content: '목표: 시험\n세부사항: 없음\n기간: 7일'
+      },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          rejected: true,
+          message: '어떤 시험인지 알려주시면 맞춤 계획을 만들어드릴 수 있어요. 예를 들어 "토익 800점", "한국사 1급", "정보처리기사" 처럼 구체적인 시험 이름을 입력해주세요!'
+        })
+      },
+      {
+        role: 'user',
+        content: '목표: 토익 700점 달성\n세부사항: 듣기와 읽기 파트 모두 공부, 하루 1시간 가능\n기간: 5일'
+      },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          rejected: false,
+          summary: '5일 동안 토익 듣기와 읽기를 균형 있게 공부하는 계획입니다. 매일 1시간씩 집중해서 핵심 문제 유형을 익힙니다.',
+          days: [
+            { day: 1, tasks: ['토익 듣기 단답형 문제 20개 풀기'] },
+            { day: 2, tasks: ['토익 읽기 빈칸 채우기 20문제 풀기'] },
+            { day: 3, tasks: [] },
+            { day: 4, tasks: ['토익 듣기 대화문 20개 풀기'] },
+            { day: 5, tasks: ['이번 주 오답 정리 및 단어 복습'] }
+          ]
+        })
+      },
+      {
+        role: 'user',
+        content: '목표: 매일 3킬로미터 달리기\n세부사항: 현재 운동 전혀 안 함\n기간: 7일'
+      },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          rejected: false,
+          summary: '7일 동안 걷기부터 시작해 3킬로미터 달리기에 도전하는 점진적 훈련입니다.',
+          days: [
+            { day: 1, tasks: ['아침 걷기 20분'] },
+            { day: 2, tasks: ['걷기 15분 후 달리기 5분'] },
+            { day: 3, tasks: ['1킬로미터 완주 도전'] },
+            { day: 4, tasks: ['걷기 10분 후 달리기 10분'] },
+            { day: 5, tasks: ['달리기 15분 도전'] },
+            { day: 6, tasks: ['스트레칭 10분 후 가벼운 걷기'] },
+            { day: 7, tasks: ['3킬로미터 완주 도전'] }
+          ]
+        })
+      }
+    ];
 
     const completion = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent },
+        ...fewShot,
+        {
+          role: 'user',
+          content: `목표: ${goal}\n세부사항: ${detail || '없음'}\n기간: ${totalDays}일\n\n반드시 "days" 배열 구조로만 응답하세요. "weeks" 키는 절대 사용하지 마세요. day 값은 반드시 숫자(1~${totalDays})로 작성하세요. ${totalDays}일치 계획을 1일차부터 ${totalDays}일차까지 생성해줘. 모든 텍스트는 한글로만 작성하고 영어나 한자는 절대 사용하지 마세요.`
+        }
       ],
-      temperature: 0.3,
+      temperature: 0.25,
       max_tokens: 3000,
       response_format: { type: 'json_object' },
     });
@@ -495,11 +555,36 @@ app.post('/ai/day-plan', authMiddleware, async (req, res) => {
     const text = completion.choices[0].message.content;
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('JSON 파싱 실패');
+
     const parsed = JSON.parse(jsonMatch[0]);
 
-    // tasks 시간 오름차순 정렬
-    if (!parsed.rejected && Array.isArray(parsed.tasks)) {
-      parsed.tasks.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+    if (!parsed.rejected) {
+      // AI가 weeks 구조로 응답한 경우 days로 변환
+      if (!Array.isArray(parsed.days) && Array.isArray(parsed.weeks)) {
+        let dayNum = 1;
+        const flatDays = [];
+        for (const week of parsed.weeks) {
+          for (const day of (week.days || [])) {
+            flatDays.push({ day: dayNum++, tasks: Array.isArray(day.tasks) ? day.tasks : [] });
+          }
+        }
+        parsed.days = flatDays;
+        delete parsed.weeks;
+      }
+
+      if (!Array.isArray(parsed.days)) {
+        return res.status(500).json({ error: 'AI 응답 구조가 올바르지 않아요. 다시 시도해주세요.' });
+      }
+
+      // days 개수가 totalDays보다 적으면 빈 일차로 채움
+      while (parsed.days.length < totalDays) {
+        parsed.days.push({ day: parsed.days.length + 1, tasks: [] });
+      }
+
+      // 일별 최대 2개 강제
+      parsed.days.forEach(d => {
+        if (Array.isArray(d.tasks) && d.tasks.length > 2) d.tasks = d.tasks.slice(0, 2);
+      });
     }
 
     res.json(parsed);
@@ -508,89 +593,136 @@ app.post('/ai/day-plan', authMiddleware, async (req, res) => {
   }
 });
 
-// ── AI 계획형 플랜 ────────────────────────────────────
-app.post('/ai/goal-plan', authMiddleware, async (req, res) => {
-  const { goal, detail, dates, dayWeights } = req.body;
+// ── AI 주간 분석 ────────────────────────────────────
+app.post('/ai/analyze', authMiddleware, async (req, res) => {
+  const { tasks } = req.body;
 
-  if (!goal || !goal.trim()) return res.status(400).json({ error: '목표를 입력해주세요.' });
-  if (!dates || !Array.isArray(dates) || dates.length === 0)
-    return res.status(400).json({ error: '날짜를 선택해주세요.' });
-  if (dates.length > 60) return res.status(400).json({ error: '날짜를 60일 이내로 선택해주세요.' });
+  if (!tasks || !Array.isArray(tasks) || tasks.length === 0) {
+    return res.status(400).json({ error: '분석할 데이터가 없습니다.' });
+  }
 
   try {
     const Groq = require('groq-sdk');
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-    const DAY_KR = ['일', '월', '화', '수', '목', '금', '토'];
-    // 날짜별 요일 + 가중치 목록
-    const dateInfo = dates.map(d => {
-      const dayLabel = DAY_KR[new Date(d + 'T00:00:00').getDay()];
-      const weight = (dayWeights && dayWeights[dayLabel]) || '중간';
-      return `${d}(${dayLabel}, 가중치:${weight})`;
-    }).join(', ');
+    const now = new Date();
+    const twoWeeksAgo = new Date(now);
+    twoWeeksAgo.setDate(now.getDate() - 14);
+    const recentTasks = tasks.filter(t => {
+      const d = new Date(t.date);
+      return d >= twoWeeksAgo && d <= now;
+    });
 
-    const systemPrompt = `당신은 목표 달성을 위한 구체적 실천 계획을 설계하는 전문 코치입니다.
+    const total = recentTasks.length;
+    const done  = recentTasks.filter(t => t.completed).length;
+    const rate  = total > 0 ? Math.round((done / total) * 100) : 0;
+
+    const DAY_KR = ['일', '월', '화', '수', '목', '금', '토'];
+    const dayStats = {};
+    recentTasks.forEach(t => {
+      const day = DAY_KR[new Date(t.date).getDay()];
+      if (!dayStats[day]) dayStats[day] = { total: 0, done: 0 };
+      dayStats[day].total++;
+      if (t.completed) dayStats[day].done++;
+    });
+
+    const systemPrompt = `당신은 개인 생산성 코치 AI입니다.
 
 [절대 규칙]
-1. 모든 텍스트는 100% 한국어(한글)로만 작성합니다. 영어·한자 사용 절대 금지.
-2. 반드시 유효한 JSON만 응답합니다. 코드블록·설명 없이 JSON만.
-3. 응답 최상위 키: "rejected", "tasks" 두 가지만.
-4. tasks 배열 각 원소: { "date": "YYYY-MM-DD", "time": "HH:MM 또는 빈 문자열", "text": "구체적 행동" }
-5. 반드시 입력받은 날짜 목록 안의 날짜만 사용합니다. 목록에 없는 날짜는 절대 사용 금지.
-6. 가중치가 "높음"인 날짜에는 중요하고 집중도 높은 작업을 배치합니다.
-7. 가중치가 "낮음"인 날짜에는 가벼운 복습·정리 작업을 배치합니다.
-8. 날짜별 할 일은 1~3개로 제한합니다.
-9. 각 할 일은 구체적 행동으로 작성합니다 (나쁜 예: "공부" / 좋은 예: "단어 30개 암기 후 예문 3개 작성").
-10. 전체 날짜에 걸쳐 목표 달성을 위한 자연스러운 점진적 흐름(초반→중반→마무리)을 만드세요.
+1. 모든 텍스트는 100% 순수 한국어(한글)로만 작성합니다.
+2. 반드시 유효한 JSON 형식으로만 응답합니다. 코드블록이나 설명을 절대 붙이지 않습니다.
+3. 요일별 할 일은 최대 2개, 권장 1개로 제한합니다.
+4. nextWeekPlan의 days 배열에는 반드시 월,화,수,목,금,토,일 순서로 7개 요일 객체가 모두 있어야 합니다.
+5. tasks가 없는 날도 빈 배열 []로 반드시 포함합니다.
+6. 톤은 따뜻하고 격려하는 말투를 사용합니다.
 
-[반려 기준 - rejected: true]
-- 목표가 너무 짧거나 의미 불명확한 경우
-- 비윤리적·폭력적 내용
-
-[정상 응답 형식]
-{ "rejected": false, "tasks": [ { "date": "2025-07-10", "time": "09:00", "text": "구체적 행동" }, ... ] }
-
-[반려 형식]
-{ "rejected": true, "message": "안내 메시지" }`;
-
-    const userContent = `목표: ${goal}
-세부사항: ${detail || '없음'}
-계획 날짜 (날짜, 요일, 가중치): ${dateInfo}
-
-위 날짜만 사용해서 목표 달성을 위한 구체적 계획을 작성해줘. 반드시 JSON만 응답.`;
+[응답 형식]
+{
+  "insights": ["인사이트 1", "인사이트 2", "다음 주 전략"],
+  "bestDay": "월요일",
+  "weakDay": "금요일",
+  "nextWeekPlan": {
+    "theme": "다음 주 핵심 목표 한 문장",
+    "days": [
+      { "day": "월", "tasks": ["구체적 행동 1개"] },
+      { "day": "화", "tasks": [] },
+      { "day": "수", "tasks": ["구체적 행동 1개"] },
+      { "day": "목", "tasks": [] },
+      { "day": "금", "tasks": ["구체적 행동 1개"] },
+      { "day": "토", "tasks": [] },
+      { "day": "일", "tasks": [] }
+    ]
+  }
+}`;
 
     const completion = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent },
+        { role: 'user', content: `분석 데이터:\n- 전체 달성률: ${rate}% (총 ${total}개 중 ${done}개 완료)\n- 요일별 통계: ${JSON.stringify(dayStats)}\n- 최근 2주 할 일: ${JSON.stringify(recentTasks.map(t => ({ date: t.date, text: t.text, completed: t.completed })))}\n\n요일별 할 일은 최대 2개, 가능하면 1개만 배치해줘.` }
       ],
-      temperature: 0.25,
-      max_tokens: 4000,
+      temperature: 0.35,
+      max_tokens: 2000,
       response_format: { type: 'json_object' },
     });
 
     const text = completion.choices[0].message.content;
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('JSON 파싱 실패');
+
     const parsed = JSON.parse(jsonMatch[0]);
 
-    // 허용된 날짜 외 필터링 + 날짜 오름차순 정렬
-    if (!parsed.rejected && Array.isArray(parsed.tasks)) {
-      const allowedSet = new Set(dates);
-      parsed.tasks = parsed.tasks
-        .filter(t => t.date && allowedSet.has(t.date))
-        .sort((a, b) => {
-          if (a.date !== b.date) return a.date.localeCompare(b.date);
-          return (a.time || '').localeCompare(b.time || '');
-        });
+    // 요일별 최대 2개 강제 적용
+    if (parsed.nextWeekPlan?.days) {
+      parsed.nextWeekPlan.days.forEach(d => {
+        if (Array.isArray(d.tasks) && d.tasks.length > 2) {
+          d.tasks = d.tasks.slice(0, 2);
+        }
+      });
     }
 
-    res.json(parsed);
+    res.json({ ...parsed, rate });
   } catch (err) {
     res.status(500).json({ error: 'AI 오류: ' + err.message });
   }
 });
+
+// ── 단일 할 일 체크 토글 ─────────────────────────────
+// 알림창에서 체크 시 전체 GET→PUT 없이 단건만 원자적으로 토글.
+// race condition 원천 차단 (GET 시점 stale 데이터 덮어쓰기 불가)
+app.patch('/tasks/:userId/toggle/:taskId', authMiddleware, async (req, res) => {
+  const { userId, taskId } = req.params;
+  if (req.user.userId !== userId)
+    return res.status(403).json({ error: '권한 없음' });
+
+  try {
+    const { data: task, error: getErr } = await supabase
+      .from('tasks')
+      .select('id, completed')
+      .eq('id', taskId)
+      .eq('user_id', userId)
+      .single();
+
+    if (getErr || !task)
+      return res.status(404).json({ error: '할 일을 찾을 수 없습니다.' });
+
+    const newCompleted = !task.completed;
+
+    const { error: updateErr } = await supabase
+      .from('tasks')
+      .update({ completed: newCompleted })
+      .eq('id', taskId)
+      .eq('user_id', userId);
+
+    if (updateErr)
+      return res.status(500).json({ error: updateErr.message });
+
+    res.json({ ok: true, taskId, completed: newCompleted });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── [S3] 업로드용 Presigned URL 발급 ────────────────
 // 프론트가 이 URL을 받아서 S3에 "직접" 파일을 PUT 업로드함 (백엔드를 경유하지 않음)
 app.post('/files/upload-url', authMiddleware, async (req, res) => {
